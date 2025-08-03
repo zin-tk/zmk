@@ -53,6 +53,9 @@ static const uint8_t peripheral_id = 0;
 
 K_SEM_DEFINE(tx_sem, 0, 1);
 
+static int64_t last_pong_time = 0;
+static bool is_transport_healthy = false;
+
 #if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
 
 static const struct device *uart = DEVICE_DT_GET(DT_INST_PHANDLE(0, device));
@@ -289,6 +292,8 @@ static ssize_t get_payload_data_size(const struct zmk_split_transport_peripheral
         return sizeof(evt->data.sensor_event);
     case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_BATTERY_EVENT:
         return sizeof(evt->data.battery_event);
+    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_TRANSPORT_PONG:
+        return 0;
     default:
         return -ENOTSUP;
     }
@@ -366,8 +371,6 @@ static int split_peripheral_wired_set_enabled(bool enabled) {
     return -ENOTSUP;
 }
 
-#if HAS_DETECT_GPIO
-
 static zmk_split_transport_peripheral_status_changed_cb_t transport_status_cb;
 
 static int
@@ -377,10 +380,11 @@ split_peripheral_wired_set_status_callback(zmk_split_transport_peripheral_status
 }
 
 static struct zmk_split_transport_status split_peripheral_wired_get_status() {
+#if HAS_DETECT_GPIO
     int detected = gpio_pin_get_dt(&detect_gpio);
     if (detected > 0) {
         return (struct zmk_split_transport_status){
-            .available = true,
+            .available = is_transport_healthy,
             .enabled = true, // Track this
             .connections = ZMK_SPLIT_TRANSPORT_CONNECTIONS_STATUS_ALL_CONNECTED,
 
@@ -393,23 +397,24 @@ static struct zmk_split_transport_status split_peripheral_wired_get_status() {
 
         };
     }
-}
-
+#else
+    return (struct zmk_split_transport_status){
+        .available = is_transport_healthy,
+        .enabled = true, // Track this
+        .connections = ZMK_SPLIT_TRANSPORT_CONNECTIONS_STATUS_ALL_CONNECTED,
+    };
 #endif // HAS_DETECT_GPIO
+}
 
 static const struct zmk_split_transport_peripheral_api peripheral_api = {
     .report_event = split_peripheral_wired_report_event,
     .set_enabled = split_peripheral_wired_set_enabled,
-#if HAS_DETECT_GPIO
     .set_status_callback = split_peripheral_wired_set_status_callback,
     .get_status = split_peripheral_wired_get_status,
-#endif // HAS_DETECT_GPIO
 };
 
 ZMK_SPLIT_TRANSPORT_PERIPHERAL_REGISTER(wired_peripheral, &peripheral_api,
                                         CONFIG_ZMK_SPLIT_WIRED_PRIORITY);
-
-#if HAS_DETECT_GPIO
 
 static void notify_transport_status(void) {
     if (transport_status_cb) {
@@ -418,7 +423,18 @@ static void notify_transport_status(void) {
     }
 }
 
-#endif // HAS_DETECT_GPIO
+static void update_transport_status_by_last_pong_time() {
+    int duration_from_last_pong = k_uptime_get() - last_pong_time;
+    if (is_transport_healthy && duration_from_last_pong > 1000) {
+        is_transport_healthy = false;
+        LOG_WRN("Transport is not healthy, last pong time: %lld", last_pong_time);
+        notify_transport_status();
+    }
+    if (!is_transport_healthy && duration_from_last_pong <= 1000) {
+        is_transport_healthy = true;
+        notify_transport_status();
+    }
+}
 
 static void process_tx_cb(void) {
     while (ring_buf_size_get(&chosen_rx_buf) > MSG_EXTRA_SIZE) {
@@ -427,7 +443,16 @@ static void process_tx_cb(void) {
                                                 sizeof(struct command_envelope));
         switch (item_err) {
         case 0:
+            last_pong_time = k_uptime_get();
+            update_transport_status_by_last_pong_time();
             if (env.payload.cmd.type == ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_POLL_EVENTS) {
+                begin_tx();
+            } else if (env.payload.cmd.type ==
+                       ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_TRANSPORT_PING) {
+                struct zmk_split_transport_peripheral_event ev = {
+                    .type = ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_TRANSPORT_PONG,
+                    .data = {.transport_pong_event = {}}};
+                split_peripheral_wired_report_event(&ev);
                 begin_tx();
             } else {
                 int ret = k_msgq_put(&cmd_msg_queue, &env.payload.cmd, K_NO_WAIT);

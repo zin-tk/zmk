@@ -51,6 +51,9 @@ static K_SEM_DEFINE(tx_sem, 0, 1);
 
 #endif
 
+static int64_t last_pong_time = 0;
+static bool is_transport_healthy = false;
+
 RING_BUF_DECLARE(rx_buf, RX_BUFFER_SIZE);
 RING_BUF_DECLARE(tx_buf, TX_BUFFER_SIZE);
 
@@ -185,6 +188,8 @@ static ssize_t get_payload_data_size(const struct zmk_split_transport_central_co
         return sizeof(cmd->data.set_physical_layout);
     case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_SET_HID_INDICATORS:
         return sizeof(cmd->data.set_hid_indicators);
+    case ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_TRANSPORT_PING:
+        return 0;
     default:
         return -ENOTSUP;
     }
@@ -244,10 +249,19 @@ void rx_done_cb(struct k_work *work) {
     k_sem_give(&tx_sem);
 
     // Poll for the next event data!
-    split_central_wired_send_command(0,
-                                     (struct zmk_split_transport_central_command){
-                                         .type = ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_POLL_EVENTS,
-                                     });
+    update_transport_status_by_last_pong_time();
+    if (!is_transport_healthy) {
+        // timeout, so we send a ping to the peripheral
+        split_central_wired_send_command(
+            0, (struct zmk_split_transport_central_command){
+                   .type = ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_TRANSPORT_PING,
+               });
+    } else {
+        split_central_wired_send_command(
+            0, (struct zmk_split_transport_central_command){
+                   .type = ZMK_SPLIT_TRANSPORT_CENTRAL_CMD_TYPE_POLL_EVENTS,
+               });
+    }
 
     k_work_reschedule(&rx_done_work, K_MSEC(CONFIG_ZMK_SPLIT_WIRED_HALF_DUPLEX_RX_TIMEOUT));
 }
@@ -408,8 +422,6 @@ static int split_central_wired_set_enabled(bool enabled) {
     return -ENOTSUP;
 }
 
-#if HAS_DETECT_GPIO
-
 static zmk_split_transport_central_status_changed_cb_t transport_status_cb;
 
 static int
@@ -419,10 +431,11 @@ split_central_wired_set_status_callback(zmk_split_transport_central_status_chang
 }
 
 static struct zmk_split_transport_status split_central_wired_get_status() {
+#if HAS_DETECT_GPIO
     int detected = gpio_pin_get_dt(&detect_gpio);
     if (detected > 0) {
         return (struct zmk_split_transport_status){
-            .available = true,
+            .available = is_transport_healthy,
             .enabled = true, // Track this
             .connections = ZMK_SPLIT_TRANSPORT_CONNECTIONS_STATUS_ALL_CONNECTED,
 
@@ -435,23 +448,24 @@ static struct zmk_split_transport_status split_central_wired_get_status() {
 
         };
     }
-}
-
+#else
+    return (struct zmk_split_transport_status){
+        .available = is_transport_healthy,
+        .enabled = true, // Track this
+        .connections = ZMK_SPLIT_TRANSPORT_CONNECTIONS_STATUS_ALL_CONNECTED,
+    };
 #endif // HAS_DETECT_GPIO
+}
 
 static const struct zmk_split_transport_central_api central_api = {
     .send_command = split_central_wired_send_command,
     .get_available_source_ids = split_central_wired_get_available_source_ids,
     .set_enabled = split_central_wired_set_enabled,
-#if HAS_DETECT_GPIO
     .set_status_callback = split_central_wired_set_status_callback,
     .get_status = split_central_wired_get_status,
-#endif // HAS_DETECT_GPIO
 };
 
 ZMK_SPLIT_TRANSPORT_CENTRAL_REGISTER(wired_central, &central_api, CONFIG_ZMK_SPLIT_WIRED_PRIORITY);
-
-#if HAS_DETECT_GPIO
 
 static void notify_transport_status(void) {
     if (transport_status_cb) {
@@ -459,7 +473,18 @@ static void notify_transport_status(void) {
     }
 }
 
-#endif
+static void update_transport_status_by_last_pong_time() {
+    int duration_from_last_pong = k_uptime_get() - last_pong_time;
+    if (is_transport_healthy && duration_from_last_pong > 1000) {
+        is_transport_healthy = false;
+        LOG_WRN("Transport is not healthy, last pong time: %lld", last_pong_time);
+        notify_transport_status();
+    }
+    if (!is_transport_healthy && duration_from_last_pong <= 1000) {
+        is_transport_healthy = true;
+        notify_transport_status();
+    }
+}
 
 static void publish_events_work(struct k_work *work) {
 
@@ -474,6 +499,8 @@ static void publish_events_work(struct k_work *work) {
             zmk_split_wired_get_item(&rx_buf, (uint8_t *)&env, sizeof(struct event_envelope));
         switch (item_err) {
         case 0:
+            last_pong_time = k_uptime_get();
+            update_transport_status_by_last_pong_time();
             zmk_split_transport_central_peripheral_event_handler(&wired_central, env.payload.source,
                                                                  env.payload.event);
             break;

@@ -25,3 +25,10 @@ properties:
   dir-gpios:
     type: phandle-array
     description: "Experimental: Set the communication direction. Used for RS-422 style comms."
+
+  enable-on-usb-power:
+    type: boolean
+    description: |
+      Enable the wired split connection when powered via USB. This is useful for devices that
+      support both USB and wired split connections, allowing the wired split to be active when
+      connected to a USB power source.
