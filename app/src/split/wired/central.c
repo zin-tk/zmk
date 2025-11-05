@@ -462,18 +462,16 @@ static void notify_transport_status(void) {
 #endif
 
 static void publish_events_work(struct k_work *work) {
-
-#if IS_HALF_DUPLEX_MODE
-    k_work_reschedule(&rx_done_work,
-                      K_MSEC(CONFIG_ZMK_SPLIT_WIRED_HALF_DUPLEX_RX_COMPLETE_TIMEOUT));
-#endif // IS_HALF_DUPLEX_MODE
-
     while (ring_buf_size_get(&rx_buf) > MSG_EXTRA_SIZE) {
         struct event_envelope env;
         int item_err =
             zmk_split_wired_get_item(&rx_buf, (uint8_t *)&env, sizeof(struct event_envelope));
         switch (item_err) {
         case 0:
+#if IS_HALF_DUPLEX_MODE
+            k_work_reschedule(&rx_done_work,
+                              K_TICKS(CONFIG_ZMK_SPLIT_WIRED_HALF_DUPLEX_RX_COMPLETE_TIMEOUT));
+#endif // IS_HALF_DUPLEX_MODE
             zmk_split_transport_central_peripheral_event_handler(&wired_central, env.payload.source,
                                                                  env.payload.event);
             break;
