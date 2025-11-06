@@ -132,8 +132,6 @@ static void begin_rx(void) {
 #endif
 }
 
-#if HAS_DETECT_GPIO
-
 static void stop_rx(void) {
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_WIRED_UART_MODE_INTERRUPT)
     uart_irq_rx_disable(uart);
@@ -149,8 +147,6 @@ static void stop_rx(void) {
     pm_device_action_run(uart, PM_DEVICE_ACTION_SUSPEND);
 #endif // IS_ENABLED(CONFIG_PM_DEVICE)
 }
-
-#endif // HAS_DETECT_GPIO
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_WIRED_UART_MODE_INTERRUPT)
 
@@ -189,15 +185,15 @@ static K_WORK_DEFINE(send_pending_tx, send_pending_tx_work_cb);
 
 #endif
 
-#if HAS_DETECT_GPIO
-
 static void notify_transport_status(void);
-
-static struct gpio_callback detect_callback;
 
 static void notify_status_work_cb(struct k_work *_work) { notify_transport_status(); }
 
 static K_WORK_DEFINE(notify_status_work, notify_status_work_cb);
+
+#if HAS_DETECT_GPIO
+
+static struct gpio_callback detect_callback;
 
 static void detect_pin_irq_callback_handler(const struct device *port, struct gpio_callback *cb,
                                             const gpio_port_pins_t pin) {
@@ -356,17 +352,13 @@ static int split_peripheral_wired_set_enabled(bool enabled) {
     if (enabled) {
         begin_rx();
         return 0;
-#if HAS_DETECT_GPIO
     } else {
         stop_rx();
         return 0;
-#endif
     }
 
     return -ENOTSUP;
 }
-
-#if HAS_DETECT_GPIO
 
 static zmk_split_transport_peripheral_status_changed_cb_t transport_status_cb;
 
@@ -377,6 +369,7 @@ split_peripheral_wired_set_status_callback(zmk_split_transport_peripheral_status
 }
 
 static struct zmk_split_transport_status split_peripheral_wired_get_status() {
+#if HAS_DETECT_GPIO
     int detected = gpio_pin_get_dt(&detect_gpio);
     if (detected > 0) {
         return (struct zmk_split_transport_status){
@@ -393,23 +386,25 @@ static struct zmk_split_transport_status split_peripheral_wired_get_status() {
 
         };
     }
-}
+#else
+    return (struct zmk_split_transport_status){
+        .available = true,
+        .enabled = true, // Track this
+        .connections = ZMK_SPLIT_TRANSPORT_CONNECTIONS_STATUS_ALL_CONNECTED,
 
+    };
 #endif // HAS_DETECT_GPIO
+}
 
 static const struct zmk_split_transport_peripheral_api peripheral_api = {
     .report_event = split_peripheral_wired_report_event,
     .set_enabled = split_peripheral_wired_set_enabled,
-#if HAS_DETECT_GPIO
     .set_status_callback = split_peripheral_wired_set_status_callback,
     .get_status = split_peripheral_wired_get_status,
-#endif // HAS_DETECT_GPIO
 };
 
 ZMK_SPLIT_TRANSPORT_PERIPHERAL_REGISTER(wired_peripheral, &peripheral_api,
                                         CONFIG_ZMK_SPLIT_WIRED_PRIORITY);
-
-#if HAS_DETECT_GPIO
 
 static void notify_transport_status(void) {
     if (transport_status_cb) {
@@ -417,8 +412,6 @@ static void notify_transport_status(void) {
         transport_status_cb(&wired_peripheral, split_peripheral_wired_get_status());
     }
 }
-
-#endif // HAS_DETECT_GPIO
 
 static void process_tx_cb(void) {
     while (ring_buf_size_get(&chosen_rx_buf) > MSG_EXTRA_SIZE) {
