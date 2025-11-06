@@ -280,7 +280,7 @@ static void serial_cb(const struct device *dev, void *user_data) {
             }
         }
 
-        if (uart_irq_tx_ready(dev)) {
+        if (ring_buf_size_get(&tx_buf) > 0 && uart_irq_tx_ready(dev)) {
 #if HAS_DIR_GPIO
             gpio_pin_set_dt(&dir_gpio, 1);
 #endif
