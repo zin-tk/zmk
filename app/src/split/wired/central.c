@@ -208,6 +208,9 @@ static int split_central_wired_send_command(uint8_t source,
 
     if (ring_buf_space_get(&tx_buf) < MSG_EXTRA_SIZE + payload_size) {
         LOG_WRN("No room to send command to the peripheral %d", source);
+        if (can_tx() >= 0) {
+            begin_tx();
+        }
         return -ENOSPC;
     }
 

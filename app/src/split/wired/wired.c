@@ -292,8 +292,12 @@ int zmk_split_wired_get_item(struct ring_buf *rx_buf, uint8_t *env, size_t env_s
         size_t payload_to_read = sizeof(prefix) + prefix.payload_size;
 
         if (payload_to_read > env_size) {
-            LOG_WRN("Invalid message with payload %d bigger than expected max %d", payload_to_read,
-                    env_size);
+            uint8_t discarded_byte;
+            ring_buf_get(rx_buf, &discarded_byte, 1);
+
+            LOG_WRN(
+                "Invalid message with payload %d bigger than expected max %d. Discarding byte %0x",
+                payload_to_read, env_size, discarded_byte);
             return -EINVAL;
         }
 
