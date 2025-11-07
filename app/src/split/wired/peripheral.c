@@ -25,6 +25,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/sensors.h>
 #include <zmk/split/transport/peripheral.h>
 #include <zmk/split/transport/types.h>
+#include <zmk/split/wired/peripheral.h>
 #include <zmk/event_manager.h>
 #include <zmk/events/position_state_changed.h>
 #include <zmk/events/sensor_event.h>
@@ -219,6 +220,8 @@ static void health_check_timeout_handler(struct k_work *work) {
 
 static K_WORK_DEFINE(send_heart_beat_work, send_heart_beat_handler);
 static K_WORK_DELAYABLE_DEFINE(health_check_timeout_work, health_check_timeout_handler);
+
+bool zmk_split_wired_peripheral_is_healthy(void) { return transport_is_heathy; }
 
 #if HAS_DETECT_GPIO
 
