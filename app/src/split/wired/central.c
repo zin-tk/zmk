@@ -60,8 +60,8 @@ RING_BUF_DECLARE(tx_buf, TX_BUFFER_SIZE);
 
 static const struct device *uart = DEVICE_DT_GET(DT_INST_PHANDLE(0, device));
 
-static uint32_t last_healthy_response_ms = 0;
-static bool transport_is_heathy = false;
+volatile static uint32_t last_healthy_response_ms = 0;
+volatile static bool transport_is_heathy = false;
 
 #define HAS_DIR_GPIO (IS_HALF_DUPLEX_MODE && DT_INST_NODE_HAS_PROP(0, dir_gpios))
 
@@ -324,6 +324,7 @@ static void detect_pin_irq_callback_handler(const struct device *port, struct gp
 
 #endif
 
+static int split_central_wired_set_enabled(bool enabled);
 static int zmk_split_wired_central_init(void) {
     if (!device_is_ready(uart)) {
         return -ENODEV;
@@ -393,6 +394,7 @@ static int zmk_split_wired_central_init(void) {
     k_timer_start(&health_check_timer, K_MSEC(DT_INST_PROP(0, health_check_interval_ms)),
                   K_MSEC(DT_INST_PROP(0, health_check_interval_ms)));
     // TODO: stop timer when suspend
+    // split_central_wired_set_enabled_internal(true); // enabled by USB
     return 0;
 }
 
@@ -406,6 +408,9 @@ static int split_central_wired_get_available_source_ids(uint8_t *sources) {
 
 static int split_central_wired_set_enabled(bool enabled) {
     enabled = true; // TODO:
+}
+
+static int split_central_wired_set_enabled_internal(bool enabled) {
     if (enabled) {
         begin_rx();
 #if IS_HALF_DUPLEX_MODE
@@ -523,6 +528,11 @@ static void publish_events_work(struct k_work *work) {
 
 static int endpoint_changed_cb(const zmk_event_t *eh) {
     if (as_zmk_usb_conn_state_changed(eh)) {
+        if (zmk_usb_get_conn_state() == ZMK_USB_CONN_NONE) {
+            split_central_wired_set_enabled_internal(false);
+        } else {
+            split_central_wired_set_enabled_internal(true);
+        }
         k_work_submit(&notify_status_work);
     }
     return ZMK_EV_EVENT_BUBBLE;

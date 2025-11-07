@@ -57,9 +57,9 @@ K_SEM_DEFINE(tx_sem, 0, 1);
 
 static const struct device *uart = DEVICE_DT_GET(DT_INST_PHANDLE(0, device));
 
-static uint32_t last_send_event_ms = 0;
-static uint32_t last_received_event_ms = 0;
-static bool transport_is_heathy = false;
+volatile static uint32_t last_send_event_ms = 0;
+volatile static uint32_t last_received_event_ms = 0;
+volatile bool transport_is_heathy = false;
 
 #define HAS_DIR_GPIO (DT_INST_NODE_HAS_PROP(0, dir_gpios))
 
@@ -210,8 +210,10 @@ static void health_check_timeout_handler(struct k_work *work) {
     uint32_t interval_ms = k_uptime_get_32() - last_received_event_ms;
     transport_is_heathy = interval_ms < DT_INST_PROP(0, health_check_interval_ms);
     if (previous_healthy_state != transport_is_heathy) {
-        LOG_INF("Transport health state changed to %d", transport_is_heathy);
-        notify_transport_status();
+        LOG_WRN("Transport health state changed to %d", transport_is_heathy);
+        k_work_submit(&notify_status_work);
+    } else {
+        LOG_WRN("Health check timeout occurred after %d ms", interval_ms);
     }
 }
 
@@ -228,7 +230,7 @@ static void detect_pin_irq_callback_handler(const struct device *port, struct gp
 }
 
 #endif
-
+static int split_peripheral_wired_set_enabled_internal(bool enabled);
 static int zmk_split_wired_peripheral_init(void) {
     if (!device_is_ready(uart)) {
         return -ENODEV;
@@ -286,7 +288,8 @@ static int zmk_split_wired_peripheral_init(void) {
     }
 
 #endif // HAS_DETECT_GPIO
-
+    // TODO: Enable wired transport only during 5V is provided
+    split_peripheral_wired_set_enabled_internal(true);
     return 0;
 }
 
@@ -373,7 +376,9 @@ split_peripheral_wired_report_event(const struct zmk_split_transport_peripheral_
 
 static bool is_enabled;
 
-static int split_peripheral_wired_set_enabled(bool enabled) {
+static int split_peripheral_wired_set_enabled(bool enabled) { return 0; }
+static int split_peripheral_wired_set_enabled_internal(bool enabled) {
+    enabled = true;
     if (is_enabled == enabled) {
         return 0;
     }
