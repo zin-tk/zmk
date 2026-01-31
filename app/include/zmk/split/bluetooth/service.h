@@ -37,3 +37,9 @@ struct zmk_split_input_event_payload {
     uint32_t value;
     uint8_t sync;
 } __packed;
+
+struct zmk_split_relay_event_payload {
+    struct relay_event_header header;
+    char event_type[CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN + 1]; // +1 is for null terminator
+    uint8_t event_data[CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN];
+} __packed;

@@ -131,6 +131,7 @@ static bool rpc_tx_buffer_write(pb_ostream_t *stream, const uint8_t *buf, size_t
         uint32_t claim_len = ring_buf_put_claim(&rpc_tx_buf, &write_buf, count - written);
 
         if (claim_len == 0) {
+            k_sleep(K_MSEC(1));
             continue;
         }
 
@@ -177,6 +178,7 @@ static pb_ostream_t pb_ostream_for_tx_buf(void *user_data) {
 }
 
 static int send_response(const zmk_studio_Response *resp) {
+    int err = 0;
     k_mutex_lock(&rpc_transport_mutex, K_FOREVER);
 
     if (!selected_transport) {
@@ -188,10 +190,16 @@ static int send_response(const zmk_studio_Response *resp) {
     pb_ostream_t stream = pb_ostream_for_tx_buf(user_data);
 
     uint8_t framing_byte = FRAMING_SOF;
-    if (ring_buf_put(&rpc_tx_buf, &framing_byte, 1) != 1) {
-        LOG_ERR("RPC TX buffer full");
-        k_mutex_unlock(&rpc_transport_mutex);
-        return -ENOMEM;
+    for (int i = 0;; i++) {
+        if (ring_buf_put(&rpc_tx_buf, &framing_byte, 1) == 1) {
+            break;
+        }
+        if (i > 1000) {
+            LOG_ERR("RPC TX buffer full");
+            err = -ENOMEM;
+            goto exit;
+        }
+        k_sleep(K_MSEC(1));
     }
 
     selected_transport->tx_notify(&rpc_tx_buf, 1, false, user_data);
@@ -202,6 +210,8 @@ static int send_response(const zmk_studio_Response *resp) {
     if (!status) {
 #if !IS_ENABLED(CONFIG_NANOPB_NO_ERRMSG)
         LOG_ERR("Failed to encode the message %s", stream.errmsg);
+#else
+        LOG_ERR("Failed to encode the message");
 #endif // !IS_ENABLED(CONFIG_NANOPB_NO_ERRMSG)
         k_mutex_unlock(&rpc_transport_mutex);
         return -EINVAL;
@@ -209,7 +219,15 @@ static int send_response(const zmk_studio_Response *resp) {
 
     framing_byte = FRAMING_EOF;
     // If response is large, tx buffer can be full for async transport.
-    while (ring_buf_put(&rpc_tx_buf, &framing_byte, 1) == 0) {
+    for (int i = 0;; i++) {
+        if (ring_buf_put(&rpc_tx_buf, &framing_byte, 1) == 1) {
+            break;
+        }
+        if (i > 1000) {
+            LOG_ERR("RPC TX buffer full");
+            err = -ENOMEM;
+            goto exit;
+        }
         k_sleep(K_MSEC(1));
     }
 
@@ -217,7 +235,7 @@ static int send_response(const zmk_studio_Response *resp) {
 
 exit:
     k_mutex_unlock(&rpc_transport_mutex);
-    return 0;
+    return err;
 }
 
 static void rpc_main(void) {
