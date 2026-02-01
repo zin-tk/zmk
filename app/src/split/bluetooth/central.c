@@ -306,6 +306,74 @@ static uint8_t split_central_sensor_notify_func(struct bt_conn *conn,
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
 
+static void update_peripherals_relay_event_work_handler(struct k_work *_work);
+
+K_MSGQ_DEFINE(relay_event_msgq, sizeof(struct zmk_split_relay_event_payload),
+              CONFIG_ZMK_SPLIT_BLE_CENTRAL_POSITION_QUEUE_SIZE, 4);
+K_WORK_DEFINE(update_peripherals_relay_event_work, update_peripherals_relay_event_work_handler);
+
+int zmk_split_central_send_relay_event(struct zmk_split_relay_event_payload *payload) {
+    int err = k_msgq_put(&relay_event_msgq, payload, K_NO_WAIT);
+    if (err) {
+        LOG_ERR("Failed to queue relay event to send (%d)", err);
+        return err;
+    }
+    k_work_submit(&update_peripherals_relay_event_work);
+    return 0;
+}
+
+static void update_peripherals_relay_event_work_handler(struct k_work *_work) {
+    struct zmk_split_relay_event_payload payload;
+    if (k_msgq_get(&relay_event_msgq, &payload, K_NO_WAIT) != 0) {
+        return;
+    }
+
+    for (int i = 0; i < ZMK_SPLIT_BLE_PERIPHERAL_COUNT; i++) {
+        struct peripheral_slot *slot = &peripherals[i];
+        if (slot->state != PERIPHERAL_SLOT_STATE_CONNECTED) {
+            continue;
+        }
+
+        if (slot->relay_event_subscribe_params.value_handle == 0) {
+            // It appears that sometimes the peripheral is considered connected
+            // before the GATT characteristics have been discovered. If this is
+            // the case, the selected_physical_layout_handle will not yet be set.
+            LOG_WRN("Peripheral relay event subscribe params not set, cannot send relay event");
+            return;
+        }
+
+        if (bt_conn_get_security(slot->conn) < BT_SECURITY_L2) {
+            LOG_WRN("Peripheral link not encrypted, cannot send relay event");
+            return;
+        }
+
+        uint8_t relay_event_buffer[sizeof(struct relay_event_header) +
+                                   CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN +
+                                   CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN];
+        size_t total_size = 0;
+        memcpy(relay_event_buffer, &payload.header, sizeof(struct relay_event_header));
+        total_size += sizeof(struct relay_event_header);
+        memcpy(relay_event_buffer + total_size, payload.event_type, payload.header.event_type_size);
+        total_size += payload.header.event_type_size;
+        memcpy(relay_event_buffer + total_size, payload.event_data, payload.header.event_data_size);
+        total_size += payload.header.event_data_size;
+        LOG_DBG("Prepared relay event of total size %d bytes (header %d, name %d, data %d)",
+                total_size, sizeof(struct relay_event_header), payload.header.event_type_size,
+                payload.header.event_data_size);
+        int err = bt_gatt_write_without_response(slot->conn,
+                                                 slot->relay_event_subscribe_params.value_handle,
+                                                 relay_event_buffer, total_size, true);
+
+        if (err < 0) {
+            LOG_ERR("Failed to write physical layout index to peripheral (err %d)", err);
+        }
+        if (k_msgq_num_used_get(&relay_event_msgq) > 0) {
+            k_work_submit(&update_peripherals_relay_event_work);
+        }
+    }
+    return;
+}
+
 static uint8_t split_central_relay_event_notify_func(struct bt_conn *conn,
                                                      struct bt_gatt_subscribe_params *params,
                                                      const void *data, uint16_t length) {
