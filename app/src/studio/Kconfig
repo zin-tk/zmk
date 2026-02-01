@@ -29,6 +29,13 @@ config ZMK_STUDIO_LOCK_ON_DISCONNECT
 
 endif
 
+config ZMK_STUDIO_LOCK_BLE_DIRECT_ADVERTISING_ON_UNLOCK
+    bool "Enable Directed Advertising on Unlock"
+    default y if ZMK_STUDIO_LOCKING && ZMK_BLE
+    help
+      When enabled, the keyboard will enable directed advertising to active profile
+      during unlock. It's required to detect device from web bluetooth API for some browsers.
+
 menuconfig ZMK_STUDIO_RPC
     bool "Remote Procedure Calls (RPC)"
     select NANOPB
