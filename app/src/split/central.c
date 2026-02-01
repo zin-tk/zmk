@@ -74,6 +74,16 @@ int zmk_split_transport_central_peripheral_event_handler(
     }
     case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_HEART_BEAT_EVENT:
         return 0;
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
+    case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_RELAY_EVENT: {
+        struct zmk_relay_event_received relay_ev;
+        relay_ev.source = source;
+        relay_ev.event_name = ev.data.relay_event.event_type;
+        relay_ev.event_data = ev.data.relay_event.event_data;
+        relay_ev.event_data_size = ev.data.relay_event.header.event_data_size;
+        return raise_zmk_relay_event_received(relay_ev);
+    }
+#endif
     default:
         LOG_WRN("GOT AN UNKNOWN EVENT TYPE %d", ev.type);
         return -ENOTSUP;

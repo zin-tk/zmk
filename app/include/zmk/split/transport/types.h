@@ -31,7 +31,21 @@ enum zmk_split_transport_peripheral_event_type {
     ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_INPUT_EVENT,
     ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_BATTERY_EVENT,
     ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_HEART_BEAT_EVENT, // for health check
+    ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_RELAY_EVENT,
 };
+
+struct relay_event_header {
+    uint8_t event_data_size;
+    uint8_t event_type_size; // filled by library. excluding null terminator
+} __packed;
+
+#ifdef CONFIG_ZMK_SPLIT_RELAY_EVENT
+struct zmk_split_relay_event_payload {
+    struct relay_event_header header;
+    char event_type[CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN + 1]; // +1 is for null terminator
+    uint8_t event_data[CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN];
+} __packed;
+#endif
 
 struct zmk_split_transport_peripheral_event {
     enum zmk_split_transport_peripheral_event_type type;
@@ -59,6 +73,14 @@ struct zmk_split_transport_peripheral_event {
         struct {
             uint8_t level;
         } battery_event;
+#ifdef CONFIG_ZMK_SPLIT_RELAY_EVENT
+        struct {
+            struct relay_event_header header;
+            char event_type[CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN +
+                            1]; // +1 is for null terminator
+            uint8_t event_data[CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN];
+        } relay_event;
+#endif
     } data;
 } __packed;
 
