@@ -77,6 +77,77 @@ static void split_svc_pos_state_ccc(const struct bt_gatt_attr *attr, uint16_t va
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
 
+static void split_svc_relay_event_from_central_callback(struct k_work *work);
+
+K_MSGQ_DEFINE(relay_event_from_central_msgq, sizeof(struct zmk_split_relay_event_payload),
+              CONFIG_ZMK_SPLIT_BLE_PERIPHERAL_POSITION_QUEUE_SIZE, 4);
+K_WORK_DEFINE(split_svc_relay_event_from_central_work, split_svc_relay_event_from_central_callback);
+
+static void split_svc_relay_event_from_central_callback(struct k_work *work) {
+    struct zmk_split_relay_event_payload payload;
+    while (k_msgq_get(&relay_event_from_central_msgq, &payload, K_NO_WAIT) == 0) {
+        struct zmk_relay_event_received relay_ev;
+        relay_ev.source = 0; // Central is always source 0
+        relay_ev.event_name = payload.event_type;
+        relay_ev.event_data = payload.event_data;
+        relay_ev.event_data_size = payload.header.event_data_size;
+        raise_zmk_relay_event_received(relay_ev);
+    }
+}
+
+static struct zmk_split_relay_event_payload last_relay_event_payload;
+
+static ssize_t split_svc_relay_event_from_central(struct bt_conn *conn,
+                                                  const struct bt_gatt_attr *attr, const void *buf,
+                                                  uint16_t len, uint16_t offset, uint8_t flags) {
+    if (offset + len > sizeof(struct zmk_split_relay_event_payload) || len == 0) {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+    }
+
+    // TODO: offset support
+    if (offset > 0) {
+        LOG_ERR("Offset not supported for relay event characteristic");
+    }
+    struct relay_event_header *header = &last_relay_event_payload.header;
+    memcpy(header, buf, sizeof(struct relay_event_header));
+
+    if (header->event_type_size > CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN) {
+        LOG_WRN("Event type name too long (%d), max is %d", header->event_type_size,
+                CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN - 1);
+        return len;
+    }
+
+    if (header->event_data_size > CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN) {
+        LOG_WRN("Event data too large (%d), max is %d", header->event_data_size,
+                CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN);
+        return len;
+    }
+
+    if (sizeof(struct relay_event_header) + header->event_type_size + header->event_data_size !=
+        len) {
+        LOG_WRN("Malformed relay event: size mismatch (expected %d, got %d)",
+                sizeof(struct relay_event_header) + header->event_type_size +
+                    header->event_data_size,
+                len);
+        return len;
+    }
+
+    memcpy(last_relay_event_payload.event_type, buf + sizeof(struct relay_event_header),
+           header->event_type_size);
+    last_relay_event_payload.event_type[header->event_type_size] = '\0';
+    memcpy(last_relay_event_payload.event_data,
+           buf + sizeof(struct relay_event_header) + header->event_type_size,
+           header->event_data_size);
+    LOG_DBG("Received relay event: type='%s', data_len=%d (wire: %d bytes)",
+            last_relay_event_payload.event_type, last_relay_event_payload.header.event_data_size,
+            len);
+
+    k_msgq_put(&relay_event_from_central_msgq, &last_relay_event_payload, K_NO_WAIT);
+    k_work_submit(&split_svc_relay_event_from_central_work);
+
+    return len;
+}
+
 static void split_svc_relay_event_ccc(const struct bt_gatt_attr *attr, uint16_t value) {
     LOG_DBG("value %d", value);
 }
@@ -204,8 +275,10 @@ BT_GATT_SERVICE_DEFINE(
     BT_GATT_CCC(split_svc_sensor_state_ccc, BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
 #endif /* ZMK_KEYMAP_HAS_SENSORS */
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
-    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(ZMK_SPLIT_BT_RELAY_EVENT_UUID), BT_GATT_CHRC_NOTIFY,
-                           BT_GATT_PERM_NONE, NULL, NULL, NULL),
+    BT_GATT_CHARACTERISTIC(BT_UUID_DECLARE_128(ZMK_SPLIT_BT_RELAY_EVENT_UUID),
+                           BT_GATT_CHRC_WRITE_WITHOUT_RESP | BT_GATT_CHRC_NOTIFY,
+                           BT_GATT_PERM_WRITE_ENCRYPT, NULL, split_svc_relay_event_from_central,
+                           NULL),
     BT_GATT_CCC(split_svc_relay_event_ccc, BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
 #endif
     DT_FOREACH_STATUS_OKAY(zmk_input_split, INPUT_SPLIT_CHARS)
@@ -459,7 +532,8 @@ int zmk_split_transport_peripheral_bt_report_event(
 
 #if IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
     case ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_BATTERY_EVENT:
-        // The BLE transport uses standard BAS service for propagation, so just return success here.
+        // The BLE transport uses standard BAS service for propagation, so just return success
+        // here.
         return 0;
 #endif
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)

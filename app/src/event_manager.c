@@ -83,10 +83,6 @@ int zmk_event_manager_release(zmk_event_t *event) {
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
 
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-
 ZMK_EVENT_IMPL(zmk_relay_event_received);
-
-#endif // IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 
 #endif // IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
