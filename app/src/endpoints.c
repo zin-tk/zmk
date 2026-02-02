@@ -301,6 +301,8 @@ static enum zmk_transport get_selected_transport(void) {
     return DEFAULT_TRANSPORT;
 }
 
+enum zmk_transport zmk_endpoints_get_preferred_transport(void) { return preferred_transport; }
+
 static struct zmk_endpoint_instance get_selected_instance(void) {
     struct zmk_endpoint_instance instance = {.transport = get_selected_transport()};
 
