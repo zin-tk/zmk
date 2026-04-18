@@ -49,11 +49,17 @@ struct peripheral_slot {
     struct bt_conn *conn;
     struct bt_gatt_discover_params discover_params;
     struct bt_gatt_subscribe_params subscribe_params;
-    struct bt_gatt_subscribe_params sensor_subscribe_params;
     struct bt_gatt_discover_params sub_discover_params;
+    struct bt_gatt_subscribe_params sensor_subscribe_params;
+    struct bt_gatt_discover_params sensor_sub_discover_params;
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
+    struct bt_gatt_subscribe_params relay_event_subscribe_params;
+    struct bt_gatt_discover_params relay_event_sub_discover_params;
+#endif
     uint16_t run_behavior_handle;
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
     struct bt_gatt_subscribe_params batt_lvl_subscribe_params;
+    struct bt_gatt_discover_params batt_lvl_sub_discover_params;
     struct bt_gatt_read_params batt_lvl_read_params;
 #endif /* IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING) */
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
@@ -300,6 +306,139 @@ static uint8_t split_central_sensor_notify_func(struct bt_conn *conn,
     return BT_GATT_ITER_CONTINUE;
 }
 #endif /* ZMK_KEYMAP_HAS_SENSORS */
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
+
+static void update_peripherals_relay_event_work_handler(struct k_work *_work);
+
+K_MSGQ_DEFINE(relay_event_msgq, sizeof(struct zmk_split_relay_event_payload),
+              CONFIG_ZMK_SPLIT_BLE_CENTRAL_POSITION_QUEUE_SIZE, 4);
+K_WORK_DEFINE(update_peripherals_relay_event_work, update_peripherals_relay_event_work_handler);
+
+int zmk_split_central_send_relay_event(struct zmk_split_relay_event_payload *payload) {
+    int err = k_msgq_put(&relay_event_msgq, payload, K_NO_WAIT);
+    if (err) {
+        LOG_ERR("Failed to queue relay event to send (%d)", err);
+        return err;
+    }
+    k_work_submit(&update_peripherals_relay_event_work);
+    return 0;
+}
+
+static void update_peripherals_relay_event_work_handler(struct k_work *_work) {
+    struct zmk_split_relay_event_payload payload;
+    if (k_msgq_get(&relay_event_msgq, &payload, K_NO_WAIT) != 0) {
+        return;
+    }
+
+    for (int i = 0; i < ZMK_SPLIT_BLE_PERIPHERAL_COUNT; i++) {
+        struct peripheral_slot *slot = &peripherals[i];
+        if (slot->state != PERIPHERAL_SLOT_STATE_CONNECTED) {
+            continue;
+        }
+
+        if (slot->relay_event_subscribe_params.value_handle == 0) {
+            // It appears that sometimes the peripheral is considered connected
+            // before the GATT characteristics have been discovered. If this is
+            // the case, the selected_physical_layout_handle will not yet be set.
+            LOG_WRN("Peripheral relay event subscribe params not set, cannot send relay event");
+            return;
+        }
+
+        if (bt_conn_get_security(slot->conn) < BT_SECURITY_L2) {
+            LOG_WRN("Peripheral link not encrypted, cannot send relay event");
+            return;
+        }
+
+        uint8_t relay_event_buffer[sizeof(struct relay_event_header) +
+                                   CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN +
+                                   CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN];
+        size_t total_size = 0;
+        memcpy(relay_event_buffer, &payload.header, sizeof(struct relay_event_header));
+        total_size += sizeof(struct relay_event_header);
+        memcpy(relay_event_buffer + total_size, payload.event_type, payload.header.event_type_size);
+        total_size += payload.header.event_type_size;
+        memcpy(relay_event_buffer + total_size, payload.event_data, payload.header.event_data_size);
+        total_size += payload.header.event_data_size;
+        LOG_DBG("Prepared relay event of total size %d bytes (header %d, name %d, data %d)",
+                total_size, sizeof(struct relay_event_header), payload.header.event_type_size,
+                payload.header.event_data_size);
+        int err = bt_gatt_write_without_response(slot->conn,
+                                                 slot->relay_event_subscribe_params.value_handle,
+                                                 relay_event_buffer, total_size, true);
+
+        if (err < 0) {
+            LOG_ERR("Failed to write physical layout index to peripheral (err %d)", err);
+        }
+        if (k_msgq_num_used_get(&relay_event_msgq) > 0) {
+            k_work_submit(&update_peripherals_relay_event_work);
+        }
+    }
+    return;
+}
+
+static uint8_t split_central_relay_event_notify_func(struct bt_conn *conn,
+                                                     struct bt_gatt_subscribe_params *params,
+                                                     const void *data, uint16_t length) {
+    if (!data) {
+        LOG_DBG("[UNSUBSCRIBED]");
+        params->value_handle = 0U;
+        return BT_GATT_ITER_STOP;
+    }
+
+    LOG_DBG("[RELAY EVENT NOTIFICATION] data %p length %u", data, length);
+
+    if (length < sizeof(struct relay_event_header)) {
+        LOG_WRN("Relay event too small (%d), need at least %d bytes", length,
+                sizeof(struct relay_event_header));
+        return BT_GATT_ITER_STOP;
+    }
+
+    struct peripheral_event_wrapper event_wrapper = {
+        .source = peripheral_slot_index_for_conn(conn),
+        .event = {.type = ZMK_SPLIT_TRANSPORT_PERIPHERAL_EVENT_TYPE_RELAY_EVENT,
+                  .data = {.relay_event = {}}}};
+    struct relay_event_header *header = &event_wrapper.event.data.relay_event.header;
+    // Unpack header struct
+    memcpy(header, data, sizeof(struct relay_event_header));
+
+    if (header->event_type_size > CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN) {
+        LOG_WRN("Event type name too long (%d), max is %d", header->event_type_size,
+                CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN - 1);
+        return BT_GATT_ITER_STOP;
+    }
+
+    if (header->event_data_size > CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN) {
+        LOG_WRN("Event data too large (%d), max is %d", header->event_data_size,
+                CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN);
+        return BT_GATT_ITER_STOP;
+    }
+
+    if (sizeof(struct relay_event_header) + header->event_type_size + header->event_data_size !=
+        length) {
+        LOG_WRN("Malformed relay event: size mismatch (expected %d, got %d)",
+                sizeof(struct relay_event_header) + header->event_type_size +
+                    header->event_data_size,
+                length);
+        return BT_GATT_ITER_STOP;
+    }
+    memcpy(event_wrapper.event.data.relay_event.event_type,
+           data + sizeof(struct relay_event_header), header->event_type_size);
+    event_wrapper.event.data.relay_event.event_type[header->event_type_size] = '\0';
+    memcpy(event_wrapper.event.data.relay_event.event_data,
+           data + sizeof(struct relay_event_header) + header->event_type_size,
+           header->event_data_size);
+    LOG_DBG("Received relay event: type='%s', data_len=%d (wire: %d bytes)",
+            event_wrapper.event.data.relay_event.event_type,
+            event_wrapper.event.data.relay_event.header.event_data_size, length);
+
+    k_msgq_put(&peripheral_event_msgq, &event_wrapper, K_NO_WAIT);
+    k_work_submit(&peripheral_event_work);
+
+    return BT_GATT_ITER_CONTINUE;
+}
+
+#endif
 
 #if IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
 
@@ -575,13 +714,28 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
             slot->discover_params.start_handle = attr->handle + 2;
             slot->discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
 
-            slot->sensor_subscribe_params.disc_params = &slot->sub_discover_params;
+            slot->sensor_subscribe_params.disc_params = &slot->sensor_sub_discover_params;
             slot->sensor_subscribe_params.end_handle = slot->discover_params.end_handle;
             slot->sensor_subscribe_params.value_handle = bt_gatt_attr_value_handle(attr);
             slot->sensor_subscribe_params.notify = split_central_sensor_notify_func;
             slot->sensor_subscribe_params.value = BT_GATT_CCC_NOTIFY;
             split_central_subscribe(conn, &slot->sensor_subscribe_params);
 #endif /* ZMK_KEYMAP_HAS_SENSORS */
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
+        } else if (bt_uuid_cmp(chrc_uuid, BT_UUID_DECLARE_128(ZMK_SPLIT_BT_RELAY_EVENT_UUID)) ==
+                   0) {
+            LOG_DBG("Found relay event characteristic");
+            slot->discover_params.uuid = NULL;
+            slot->discover_params.start_handle = attr->handle + 2;
+            slot->discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+
+            slot->relay_event_subscribe_params.disc_params = &slot->relay_event_sub_discover_params;
+            slot->relay_event_subscribe_params.end_handle = slot->discover_params.end_handle;
+            slot->relay_event_subscribe_params.value_handle = bt_gatt_attr_value_handle(attr);
+            slot->relay_event_subscribe_params.notify = split_central_relay_event_notify_func;
+            slot->relay_event_subscribe_params.value = BT_GATT_CCC_NOTIFY;
+            split_central_subscribe(conn, &slot->relay_event_subscribe_params);
+#endif
 #if IS_ENABLED(CONFIG_ZMK_INPUT_SPLIT)
         } else if (bt_uuid_cmp(chrc_uuid, BT_UUID_DECLARE_128(ZMK_SPLIT_BT_INPUT_EVENT_UUID)) ==
                    0) {
@@ -624,7 +778,7 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
         } else if (!bt_uuid_cmp(((struct bt_gatt_chrc *)attr->user_data)->uuid,
                                 BT_UUID_BAS_BATTERY_LEVEL)) {
             LOG_DBG("Found battery level characteristics");
-            slot->batt_lvl_subscribe_params.disc_params = &slot->sub_discover_params;
+            slot->batt_lvl_subscribe_params.disc_params = &slot->batt_lvl_sub_discover_params;
             slot->batt_lvl_subscribe_params.end_handle = slot->discover_params.end_handle;
             slot->batt_lvl_subscribe_params.value_handle = bt_gatt_attr_value_handle(attr);
             slot->batt_lvl_subscribe_params.notify = split_central_battery_level_notify_func;
@@ -691,6 +845,10 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
 #if ZMK_KEYMAP_HAS_SENSORS
     subscribed = subscribed && slot->sensor_subscribe_params.value_handle;
 #endif /* ZMK_KEYMAP_HAS_SENSORS */
+
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
+    subscribed = subscribed && slot->relay_event_subscribe_params.value_handle;
+#endif
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
     subscribed = subscribed && slot->update_hid_indicators;
