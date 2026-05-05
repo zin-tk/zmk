@@ -14,7 +14,11 @@ jobs:
   sync:
     strategy:
       matrix:
-        branch: [main, main+dya]
+        branch:
+          - main
+          - main+dya
+          - main+nrf-half-duplex-uart
+          - main+custom-studio-protocol
 
     runs-on: ubuntu-latest
 
