@@ -38,4 +38,3 @@ properties:
     default: 800
     description: |
       Interval in milliseconds between heart-beat events sent from peripheral to central.
-
