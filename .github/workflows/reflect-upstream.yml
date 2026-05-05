@@ -71,4 +71,4 @@ jobs:
             --title "[Sync] Merge ${{ env.UPSTREAM_REPO }}:${{ env.UPSTREAM_BRANCH }} to ${{ matrix.branch }}" \
             --body "This PR syncs the ${{ matrix.branch }} branch with the latest changes from the upstream [${{ env.UPSTREAM_REPO }}:${{ env.UPSTREAM_BRANCH }}](https://github.com/${{ env.UPSTREAM_REPO }}/tree/${{ env.UPSTREAM_BRANCH }})"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT_PR }}
