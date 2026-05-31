@@ -34,7 +34,8 @@ enum zmk_split_transport_peripheral_event_type {
 };
 
 struct relay_event_header {
-    uint8_t event_data_size;
+    uint8_t sequence;        // lower 7 bits are sequence, upper bit indicates final chunk
+    uint8_t event_data_size; // chunk data size on wire, event data size after reassembly
     uint8_t event_type_size; // filled by library. excluding null terminator
 } __packed;
 
