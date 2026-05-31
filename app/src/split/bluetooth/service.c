@@ -14,6 +14,7 @@
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
+#include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/uuid.h>
 
@@ -27,6 +28,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/split/bluetooth/service.h>
 
 #include "peripheral.h"
+#include "relay_event.h"
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_PERIPHERAL_HID_INDICATORS)
 #include <zmk/events/hid_indicators_changed.h>
@@ -95,54 +97,47 @@ static void split_svc_relay_event_from_central_callback(struct k_work *work) {
     }
 }
 
-static struct zmk_split_relay_event_payload last_relay_event_payload;
+static struct zmk_split_relay_event_chunk_reassembly_state
+    relay_event_from_central_chunk_reassembly_state;
 
 static ssize_t split_svc_relay_event_from_central(struct bt_conn *conn,
                                                   const struct bt_gatt_attr *attr, const void *buf,
                                                   uint16_t len, uint16_t offset, uint8_t flags) {
-    if (offset + len > sizeof(struct zmk_split_relay_event_payload) || len == 0) {
+    if (offset != 0 || len <= sizeof(struct relay_event_header)) {
+        LOG_WRN("Invalid relay event chunk write from central: len=%u offset=%u flags=0x%02x", len,
+                offset, flags);
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
     }
 
-    // TODO: offset support
-    if (offset > 0) {
-        LOG_ERR("Offset not supported for relay event characteristic");
-    }
-    struct relay_event_header *header = &last_relay_event_payload.header;
-    memcpy(header, buf, sizeof(struct relay_event_header));
+    struct relay_event_header header;
+    memcpy(&header, buf, sizeof(header));
+    const uint8_t *chunk_data = (const uint8_t *)buf + sizeof(struct relay_event_header);
+    uint16_t chunk_data_len = len - sizeof(struct relay_event_header);
+    bool is_end = (header.sequence & ZMK_SPLIT_RELAY_EVENT_SEQUENCE_END) != 0;
 
-    if (header->event_type_size > CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN) {
-        LOG_WRN("Event type name too long (%d), max is %d", header->event_type_size,
-                CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN - 1);
+    LOG_DBG("Received relay event chunk from central: seq=%u end=%d chunk_len=%u frame_len=%u "
+            "type_len=%u state_received=%u",
+            header.sequence & ZMK_SPLIT_RELAY_EVENT_SEQUENCE_MASK, is_end, chunk_data_len, len,
+            header.event_type_size, relay_event_from_central_chunk_reassembly_state.received_size);
+
+    int result = zmk_split_relay_event_chunk_reassembly_accept(
+        &relay_event_from_central_chunk_reassembly_state, &header, chunk_data, chunk_data_len);
+    if (result < 0) {
+        LOG_WRN("Malformed relay event chunk from central: seq=%u end=%d chunk_len=%u "
+                "frame_len=%u type_len=%u err=%d",
+                header.sequence & ZMK_SPLIT_RELAY_EVENT_SEQUENCE_MASK, is_end, chunk_data_len, len,
+                header.event_type_size, result);
         return len;
     }
 
-    if (header->event_data_size > CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN) {
-        LOG_WRN("Event data too large (%d), max is %d", header->event_data_size,
-                CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN);
+    if (result == 0) {
         return len;
     }
 
-    if (sizeof(struct relay_event_header) + header->event_type_size + header->event_data_size !=
-        len) {
-        LOG_WRN("Malformed relay event: size mismatch (expected %d, got %d)",
-                sizeof(struct relay_event_header) + header->event_type_size +
-                    header->event_data_size,
-                len);
-        return len;
-    }
+    struct zmk_split_relay_event_payload *payload =
+        &relay_event_from_central_chunk_reassembly_state.payload;
 
-    memcpy(last_relay_event_payload.event_type, buf + sizeof(struct relay_event_header),
-           header->event_type_size);
-    last_relay_event_payload.event_type[header->event_type_size] = '\0';
-    memcpy(last_relay_event_payload.event_data,
-           buf + sizeof(struct relay_event_header) + header->event_type_size,
-           header->event_data_size);
-    LOG_DBG("Received relay event: type='%s', data_len=%d (wire: %d bytes)",
-            last_relay_event_payload.event_type, last_relay_event_payload.header.event_data_size,
-            len);
-
-    k_msgq_put(&relay_event_from_central_msgq, &last_relay_event_payload, K_NO_WAIT);
+    k_msgq_put(&relay_event_from_central_msgq, payload, K_NO_WAIT);
     k_work_submit(&split_svc_relay_event_from_central_work);
 
     return len;
@@ -399,14 +394,96 @@ static int zmk_split_bt_sensor_triggered(uint8_t sensor_index,
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
 
 static struct zmk_split_relay_event_payload last_relay_event;
-static uint8_t relay_event_buffer[sizeof(struct relay_event_header) +
-                                  CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN +
-                                  CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN];
+static uint8_t relay_event_tx_sequence;
+static uint8_t relay_event_frame[sizeof(struct relay_event_header) +
+                                 CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN +
+                                 CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN];
 K_MSGQ_DEFINE(relay_event_msgq, sizeof(struct zmk_split_relay_event_payload),
               CONFIG_ZMK_SPLIT_BLE_PERIPHERAL_POSITION_QUEUE_SIZE, 4);
 
+static void split_svc_find_first_conn(struct bt_conn *conn, void *data) {
+    struct bt_conn **found = data;
+
+    if (*found == NULL) {
+        *found = bt_conn_ref(conn);
+    }
+}
+
+static struct bt_conn *split_svc_current_conn(void) {
+    struct bt_conn *conn = NULL;
+
+    bt_conn_foreach(BT_CONN_TYPE_LE, split_svc_find_first_conn, &conn);
+    return conn;
+}
+
+static int
+split_svc_notify_relay_event_chunks(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                                    const struct zmk_split_relay_event_payload *payload) {
+    uint16_t total_size;
+    int err = zmk_split_relay_event_payload_total_size(payload, &total_size);
+    if (err < 0) {
+        LOG_WRN("Invalid relay event payload (err %d)", err);
+        return err;
+    }
+
+    uint16_t mtu = bt_gatt_get_mtu(conn);
+    if (mtu <= ZMK_SPLIT_RELAY_EVENT_ATT_VALUE_OVERHEAD + sizeof(struct relay_event_header)) {
+        LOG_WRN("ATT MTU %u too small for relay event chunk header", mtu);
+        return -EMSGSIZE;
+    }
+
+    uint16_t max_frame_len = mtu - ZMK_SPLIT_RELAY_EVENT_ATT_VALUE_OVERHEAD;
+    uint16_t max_chunk_data_len = max_frame_len - sizeof(struct relay_event_header);
+    max_chunk_data_len = MIN(max_chunk_data_len, UINT8_MAX);
+
+    uint16_t sent_size = 0;
+
+    LOG_DBG("Prepared relay event of total size %u bytes (name %u, data %u)", total_size,
+            payload->header.event_type_size, payload->header.event_data_size);
+
+    while (sent_size < total_size) {
+        uint16_t chunk_data_len = MIN(max_chunk_data_len, total_size - sent_size);
+        bool is_end = (sent_size + chunk_data_len) == total_size;
+        struct relay_event_header *header = (struct relay_event_header *)relay_event_frame;
+
+        *header = (struct relay_event_header){
+            .sequence = relay_event_tx_sequence & ZMK_SPLIT_RELAY_EVENT_SEQUENCE_MASK,
+            .event_type_size = payload->header.event_type_size,
+            .event_data_size = chunk_data_len,
+        };
+        if (is_end) {
+            header->sequence |= ZMK_SPLIT_RELAY_EVENT_SEQUENCE_END;
+        }
+        relay_event_tx_sequence =
+            (relay_event_tx_sequence + 1) & ZMK_SPLIT_RELAY_EVENT_SEQUENCE_MASK;
+
+        zmk_split_relay_event_copy_payload_data(
+            payload, sent_size, relay_event_frame + sizeof(struct relay_event_header),
+            chunk_data_len);
+
+        uint16_t frame_len = sizeof(struct relay_event_header) + chunk_data_len;
+        LOG_DBG("Notifying relay event chunk to central: seq=%u end=%d chunk_len=%u "
+                "frame_len=%u sent=%u total=%u mtu=%u",
+                header->sequence & ZMK_SPLIT_RELAY_EVENT_SEQUENCE_MASK, is_end, chunk_data_len,
+                frame_len, sent_size, total_size, mtu);
+        err = bt_gatt_notify(conn, attr, relay_event_frame, frame_len);
+        if (err < 0) {
+            LOG_WRN("Error notifying relay event chunk: seq=%u end=%d err=%d",
+                    header->sequence & ZMK_SPLIT_RELAY_EVENT_SEQUENCE_MASK, is_end, err);
+            return err;
+        }
+
+        sent_size += chunk_data_len;
+    }
+
+    return 0;
+}
+
 void send_relay_event_callback(struct k_work *work) {
     while (k_msgq_get(&relay_event_msgq, &last_relay_event, K_NO_WAIT) == 0) {
+        LOG_DBG("Dequeued relay event to notify: type_len=%u data_len=%u",
+                last_relay_event.header.event_type_size, last_relay_event.header.event_data_size);
+
         // Find the relay event characteristic attribute index
         size_t relay_attr_index = 0;
         for (size_t i = 0; i < split_svc.attr_count; i++) {
@@ -418,27 +495,20 @@ void send_relay_event_callback(struct k_work *work) {
         }
 
         if (relay_attr_index > 0) {
-            // pack to relay_event_buffer
-            size_t total_size = 0;
-            memcpy(relay_event_buffer, &last_relay_event.header, sizeof(struct relay_event_header));
-            total_size += sizeof(struct relay_event_header);
-            memcpy(relay_event_buffer + total_size, last_relay_event.event_type,
-                   last_relay_event.header.event_type_size);
-            total_size += last_relay_event.header.event_type_size;
-            memcpy(relay_event_buffer + total_size, last_relay_event.event_data,
-                   last_relay_event.header.event_data_size);
-            total_size += last_relay_event.header.event_data_size;
-            LOG_DBG("Prepared relay event of total size %d bytes (header %d, name %d, data %d)",
-                    total_size, sizeof(struct relay_event_header),
-                    last_relay_event.header.event_type_size,
-                    last_relay_event.header.event_data_size);
-            // Send only the actual bytes needed
-            int err = bt_gatt_notify(NULL, &split_svc.attrs[relay_attr_index], relay_event_buffer,
-                                     total_size);
-            if (err) {
-                LOG_WRN("Error notifying relay event %d", err);
-            } else {
-                LOG_DBG("Notified relay event of type %s", last_relay_event.event_type);
+            struct bt_conn *conn = split_svc_current_conn();
+            if (!conn) {
+                LOG_WRN("No central connection to notify relay event");
+                continue;
+            }
+
+            int err = split_svc_notify_relay_event_chunks(conn, &split_svc.attrs[relay_attr_index],
+                                                          &last_relay_event);
+            bt_conn_unref(conn);
+
+            if (!err) {
+                LOG_DBG("Notified relay event: type_len=%u data_len=%u",
+                        last_relay_event.header.event_type_size,
+                        last_relay_event.header.event_data_size);
             }
         } else {
             LOG_WRN("Could not find relay event characteristic to send relay event");
@@ -545,6 +615,7 @@ int zmk_split_transport_peripheral_bt_report_event(
             strnlen(ev->data.relay_event.event_type, CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN);
         memcpy(relay_ev.event_type, ev->data.relay_event.event_type,
                relay_ev.header.event_type_size);
+        relay_ev.event_type[relay_ev.header.event_type_size] = '\0';
         memcpy(relay_ev.event_data, ev->data.relay_event.event_data,
                ev->data.relay_event.header.event_data_size);
         return zmk_split_bt_send_relay_event(&relay_ev);
