@@ -128,10 +128,12 @@ config ZMK_STUDIO_RPC_CUSTOM_SUBSYSTEM_IDENTIFIER_MAX_LEN
 
 config ZMK_STUDIO_RPC_CUSTOM_SUBSYSTEM_REQUEST_PAYLOAD_MAX_BYTES
     int "Custom Subsystem Request Payload Max Bytes"
-    default 25
+    default ZMK_STUDIO_RPC_RX_BUF_SIZE
     help
       Maximum size of the payload in a custom subsystem request.
-      This value need to be smaller than ZMK_STUDIO_RPC_RX_BUF_SIZE + other field overheads.
+      Defaults to ZMK_STUDIO_RPC_RX_BUF_SIZE so the generated custom subsystem request
+      payload capacity follows the configured RPC RX buffer size unless explicitly
+      overridden.
 
 endif
 

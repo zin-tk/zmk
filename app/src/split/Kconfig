@@ -46,10 +46,10 @@ config ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN
 
 config ZMK_SPLIT_RELAY_EVENT_DATA_LEN
     int "Maximum size of event payload to relay in bytes"
-    default 14
+    default 128
     help
-        Maximum size of the event data payload that can be sent from
-        peripheral to central via relay events.
+        Maximum size of the event data payload that can be sent between
+        peripheral and central via relay events.
 endif # ZMK_SPLIT_RELAY_EVENT
 
 endif # ZMK_SPLIT
