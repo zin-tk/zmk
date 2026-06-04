@@ -54,6 +54,7 @@ struct peripheral_slot {
     struct bt_gatt_subscribe_params relay_event_subscribe_params;
 #endif
     struct bt_gatt_discover_params sub_discover_params;
+    struct bt_gatt_discover_params sensor_sub_discover_params;
     uint16_t run_behavior_handle;
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
     struct bt_gatt_subscribe_params batt_lvl_subscribe_params;
@@ -711,7 +712,7 @@ static uint8_t split_central_chrc_discovery_func(struct bt_conn *conn,
             slot->discover_params.start_handle = attr->handle + 2;
             slot->discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
 
-            slot->sensor_subscribe_params.disc_params = &slot->sub_discover_params;
+            slot->sensor_subscribe_params.disc_params = &slot->sensor_sub_discover_params;
             slot->sensor_subscribe_params.end_handle = slot->discover_params.end_handle;
             slot->sensor_subscribe_params.value_handle = bt_gatt_attr_value_handle(attr);
             slot->sensor_subscribe_params.notify = split_central_sensor_notify_func;
@@ -1448,3 +1449,4 @@ void peripheral_event_work_callback(struct k_work *work) {
         zmk_split_transport_central_peripheral_event_handler(&bt_central, ev.source, ev.event);
     }
 }
+
