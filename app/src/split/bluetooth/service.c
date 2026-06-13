@@ -220,7 +220,7 @@ void send_position_state_callback(struct k_work *work) {
     while (k_msgq_get(&position_state_msgq, &state, K_NO_WAIT) == 0) {
         int err = bt_gatt_notify(NULL, &split_svc.attrs[1], &state, sizeof(state));
         if (err) {
-            LOG_WRN("Error notifying position %d", err);
+            LOG_DBG("Error notifying %d", err);
         }
     }
 };
@@ -267,7 +267,7 @@ void send_sensor_state_callback(struct k_work *work) {
         int err = bt_gatt_notify(NULL, &split_svc.attrs[8], &last_sensor_event,
                                  sizeof(last_sensor_event));
         if (err) {
-            LOG_WRN("Error notifying sensor %d", err);
+            LOG_DBG("Error notifying %d", err);
         }
     }
 };

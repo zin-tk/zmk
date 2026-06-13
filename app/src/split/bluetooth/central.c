@@ -273,7 +273,7 @@ static uint8_t split_central_sensor_notify_func(struct bt_conn *conn,
         return BT_GATT_ITER_STOP;
     }
 
-    LOG_DBG("[SENSOR NOTIFICATION] data %p length %u", data, length);
+    LOG_WRN("[SENSOR NOTIFICATION] data %p length %u", data, length);
 
     if (length < offsetof(struct sensor_event, channel_data)) {
         LOG_WRN("Ignoring sensor notify with insufficient data length (%d)", length);
@@ -362,7 +362,7 @@ static uint8_t split_central_notify_func(struct bt_conn *conn,
         return BT_GATT_ITER_STOP;
     }
 
-    LOG_DBG("[NOTIFICATION] data %p length %u", data, length);
+    LOG_WRN("[NOTIFICATION] data %p length %u", data, length);
 
     for (int i = 0; i < POSITION_STATE_DATA_LEN; i++) {
         slot->changed_positions[i] = ((uint8_t *)data)[i] ^ slot->position_state[i];
